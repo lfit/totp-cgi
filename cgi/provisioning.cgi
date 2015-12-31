@@ -26,6 +26,8 @@ import logging
 import cgitb
 cgitb.enable()
 
+import pyotp
+
 import totpcgi
 import totpcgi.backends
 import totpcgi.utils
@@ -35,6 +37,11 @@ from qrcode.image import svg
 from StringIO import StringIO
 
 from string import Template
+
+try:
+    from urllib.parse import quote
+except ImportError:
+    from urllib import quote
 
 if len(sys.argv) > 1:
     # blindly assume it's the config file
@@ -151,16 +158,34 @@ def show_reissue_page(config, user):
     sys.stdout.write(out)
     sys.exit(0)
 
+def show_reissue_denied(config):
+    syslog.syslog(syslog.LOG_NOTICE,
+        'Attempt to reissue token when token reissuance disabled')
+    bad_request(config, "The ability to reissue tokens is currently disabled.")
 
 def show_totp_page(config, user, gaus):
     # generate provisioning URI
     tpt = Template(config.get('secret', 'totp_user_mask'))
+    try:
+        totp_issuer = config.get('secret', 'totp_issuer')
+    except ConfigParser.NoOptionError:
+        totp_issuer = None
     totp_user = tpt.safe_substitute(username=user)
-    totp_qr_uri = gaus.totp.provisioning_uri(totp_user)
+
+    if pyotp.VERSION.find('1.3') == 0:
+        # Older versions of pyotp don't deal with issuer_name
+        if totp_issuer is not None:
+            base = '%s:%s' % (totp_issuer, totp_user)
+            totp_qr_uri = gaus.otp.provisioning_uri(base)
+            totp_qr_uri += '&issuer=%s' % quote(totp_issuer)
+        else:
+            totp_qr_uri = gaus.otp.provisioning_uri(totp_user)
+    else:
+        totp_qr_uri = gaus.otp.provisioning_uri(totp_user, issuer_name=totp_issuer)
 
     action_url = config.get('secret', 'action_url')
-    
-    qrcode_embed = '<img src="%s?qrcode=%s"/>' % (action_url, totp_qr_uri)
+
+    qrcode_embed = '<img src="%s?qrcode=%s"/>' % (action_url, quote(totp_qr_uri))
 
     templates_dir = config.get('secret', 'templates_dir')
     fh = open(os.path.join(templates_dir, 'totp.html'))
@@ -283,12 +308,25 @@ def cgimain():
     except totpcgi.UserSecretError, ex:
         bad_request(config, 'Existing secret could not be processed: %s' % ex)
 
+    try:
+        allow_reissue = config.getboolean('secret', 'allow_reissue')
+    except ConfigParser.NoOptionError:
+        allow_reissue = True
+
     if exists and action != 'reissue':
         syslog.syslog(syslog.LOG_NOTICE,
             'Secret exists: user=%s, host=%s' % (user, remote_host))
-        show_reissue_page(config, user)
+        # make sure we're allowed to reissue tokens
+        if allow_reissue:
+            show_reissue_page(config, user)
+        else:
+            show_reissue_denied(config)
 
     if action == 'reissue':
+        # make sure we're allowed to reissue
+        if not allow_reissue:
+            show_reissue_denied(config)
+
         # verify token first
         tokencode = form.getfirst('tokencode')
         gau = totpcgi.GAUser(user, backends)

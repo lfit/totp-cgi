@@ -27,12 +27,19 @@ import totpcgi
 import totpcgi.backends
 import totpcgi.utils
 
+import pyotp
+
 import getpass
 
 import syslog
 syslog.openlog('totpprov', syslog.LOG_PID, syslog.LOG_AUTH)
 
 from string import Template
+
+try:
+    from urllib.parse import quote
+except ImportError:
+    from urllib import quote
 
 
 def ays():
@@ -199,8 +206,22 @@ def generate_user_token(backends, config, args, pincode=None):
     print 'New token generated for user %s' % user
     # generate provisioning URI
     tpt = Template(config.get('secret', 'totp_user_mask'))
+    try:
+        totp_issuer = config.get('secret', 'totp_issuer')
+    except ConfigParser.NoOptionError:
+        totp_issuer = None
     totp_user = tpt.safe_substitute(username=user)
-    qr_uri = gaus.otp.provisioning_uri(totp_user)
+
+    if pyotp.VERSION.find('1.3') == 0:
+        # Older versions of pyotp don't deal with issuer_name
+        if totp_issuer is not None:
+            base = '%s:%s' % (totp_issuer, totp_user)
+            qr_uri = gaus.otp.provisioning_uri(base)
+            qr_uri += '&issuer=%s' % quote(totp_issuer)
+        else:
+            qr_uri = gaus.otp.provisioning_uri(totp_user)
+    else:
+        qr_uri = gaus.otp.provisioning_uri(totp_user, issuer_name=totp_issuer)
 
     print 'OTP URI: %s' % qr_uri
     if gaus.is_hotp():
@@ -315,7 +336,7 @@ if __name__ == '__main__':
         generate_user_token(backends, config, args)
 
     elif command == 'provision-user':
-        print 'Provisioning new TOTP user %s' % args[1]
+        print 'Provisioning new user %s' % args[1]
         ays()
         provision_user(backends, config, args)
 
